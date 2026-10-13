@@ -258,6 +258,62 @@ def inject_custom_css():
         color: #000000 !important;
     }
     
+    /* File Uploader styling & Filename visibility */
+    [data-testid="stFileUploader"] {
+        background: rgba(19, 27, 46, 0.6) !important;
+        border: 1px dashed rgba(99, 102, 241, 0.4) !important;
+        border-radius: 14px !important;
+        padding: 16px !important;
+    }
+    [data-testid="stFileUploaderFileName"], .uploadedFileName, [data-testid="stFileUploaderFile"] div {
+        color: #F8FAFC !important;
+        font-weight: 600 !important;
+        font-size: 14px !important;
+    }
+    [data-testid="stFileUploaderFile"] {
+        background: rgba(30, 41, 59, 0.9) !important;
+        border-radius: 10px !important;
+        border: 1px solid rgba(255, 255, 255, 0.12) !important;
+        padding: 8px 12px !important;
+    }
+    [data-testid="stFileUploaderFile"] small {
+        color: #94A3B8 !important;
+    }
+    
+    /* Password input eye toggle button */
+    .eye-toggle-btn button {
+        height: 42px !important;
+        font-size: 18px !important;
+        padding: 0 10px !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        background: rgba(30, 41, 59, 0.8) !important;
+        border: 1px solid rgba(255, 255, 255, 0.15) !important;
+    }
+    .eye-toggle-btn button:hover {
+        background: rgba(99, 102, 241, 0.3) !important;
+        border-color: #6366F1 !important;
+    }
+
+    /* About section and Documentation Cards */
+    .about-card {
+        background: linear-gradient(145deg, #131B2E 0%, #0F172A 100%);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 16px;
+        padding: 24px;
+        margin-bottom: 20px;
+        box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.4);
+    }
+    .about-card h3, .about-card h4, .about-card h5 {
+        color: #F8FAFC !important;
+    }
+    .about-card p, .about-card li {
+        color: #E2E8F0 !important;
+        font-size: 14px !important;
+        line-height: 1.65 !important;
+    }
+    
     /* Demo Product Card */
     .demo-card {
         background: rgba(30, 41, 59, 0.5);
@@ -309,6 +365,25 @@ def sentiment_badge(sentiment: str) -> str:
     }
     css_class = badge_map.get(sentiment, 'badge-neutral')
     return f'<span class="badge {css_class}">{html.escape(str(sentiment))}</span>'
+
+
+def recommendation_badge(rec_string: str) -> str:
+    """Generate HTML badge for My Recommendation column."""
+    if not rec_string:
+        return ""
+    rec_str = str(rec_string)
+    if rec_str.startswith("Not Recommended"):
+        badge_html = '<span class="badge badge-negative">❌ Not Recommended</span>'
+        detail = rec_str.replace("Not Recommended", "", 1).lstrip(" —-:")
+    elif rec_str.startswith("Recommended"):
+        badge_html = '<span class="badge badge-positive">✅ Recommended</span>'
+        detail = rec_str.replace("Recommended", "", 1).lstrip(" —-:")
+    else:
+        badge_html = '<span class="badge badge-neutral">⚖️ Mixed</span>'
+        detail = rec_str.replace("Mixed", "", 1).lstrip(" —-:")
+    if detail:
+        return f'{badge_html} <span style="color: #CBD5E1; font-size: 12px;">{html.escape(detail)}</span>'
+    return badge_html
 
 
 def status_badge(status: str) -> str:

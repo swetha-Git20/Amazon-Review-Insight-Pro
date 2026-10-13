@@ -23,7 +23,10 @@ from database.database import (
 
 # Import NLP services
 from services.sentiment import analyze_sentiment
-from services.review_analyzer import calculate_suspicion_score, get_all_rule_descriptions
+from services.review_analyzer import (
+    calculate_suspicion_score, get_all_rule_descriptions,
+    generate_review_recommendation, generate_product_recommendation
+)
 from services.data_processor import (
     parse_uploaded_file, validate_csv, clean_dataframe,
     limit_reviews, process_reviews_batch, load_sample_csv, MAX_REVIEWS
@@ -35,7 +38,7 @@ from services.review_fetcher import (
 # Import UI helpers and styling
 from utils.helpers import (
     inject_custom_css, metric_card, sentiment_badge, status_badge,
-    info_box, empty_state, display_suspicion_indicators,
+    recommendation_badge, info_box, empty_state, display_suspicion_indicators,
     display_rating_stars, render_amazon_link_button, get_color_palette, COLORS
 )
 
@@ -69,6 +72,18 @@ if 'home_product_url' not in st.session_state:
 if 'active_dashboard_product' not in st.session_state:
     st.session_state.active_dashboard_product = None
 
+# Password visibility session states
+if 'show_login_pwd' not in st.session_state:
+    st.session_state.show_login_pwd = False
+if 'show_reg_pwd' not in st.session_state:
+    st.session_state.show_reg_pwd = False
+if 'show_reg_conf' not in st.session_state:
+    st.session_state.show_reg_conf = False
+if 'show_reset_pwd' not in st.session_state:
+    st.session_state.show_reset_pwd = False
+if 'show_reset_conf' not in st.session_state:
+    st.session_state.show_reset_conf = False
+
 
 # Load spaCy NLP model safely with fallback
 @st.cache_resource
@@ -90,7 +105,7 @@ nlp_model = load_spacy_model()
 def render_auth_page():
     """
     Render a professional login and registration page with a sleek dark theme,
-    Poppins typography, input validation, and secure password authentication.
+    Poppins typography, input validation, and password visibility eye icons.
     """
     col_center = st.columns([1, 2, 1])[1]
     
@@ -120,30 +135,48 @@ def render_auth_page():
             st.markdown("##### Welcome Back")
             st.caption("Sign in to access your private reviews, uploaded datasets, and analysis history.")
             
-            with st.form("login_form", clear_on_submit=False):
-                login_ident = st.text_input("Username or Email", placeholder="e.g., analyst_user or user@example.com")
-                login_pwd = st.text_input("Password", type="password", placeholder="Enter your password")
-                login_submit = st.form_submit_button("Sign In to Analyzer", use_container_width=True)
+            login_ident = st.text_input("Username or Email", placeholder="e.g., analyst_user or user@example.com", key="auth_login_ident")
+            
+            # Password input with interactive eye icon toggle
+            col_lpwd, col_leye = st.columns([7, 1])
+            with col_lpwd:
+                is_lpwd_visible = st.session_state.show_login_pwd
+                login_pwd = st.text_input(
+                    "Password",
+                    type="text" if is_lpwd_visible else "password",
+                    placeholder="Enter your password",
+                    key="auth_login_pwd"
+                )
+            with col_leye:
+                st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+                st.markdown("<div class='eye-toggle-btn'>", unsafe_allow_html=True)
+                if st.button("👁️" if not is_lpwd_visible else "🙈", key="btn_eye_login_pwd", help="Toggle password visibility"):
+                    st.session_state.show_login_pwd = not is_lpwd_visible
+                    st.rerun()
+                st.markdown("</div>", unsafe_allow_html=True)
                 
-                if login_submit:
-                    if not login_ident.strip() or not login_pwd:
-                        st.error("Please provide both your username/email and password.")
+            st.write("")
+            login_submit = st.button("Sign In to Analyzer", use_container_width=True, type="primary", key="btn_auth_login")
+            
+            if login_submit:
+                if not login_ident.strip() or not login_pwd:
+                    st.error("Please provide both your username/email and password.")
+                else:
+                    success, message, user_data = authenticate_user(login_ident, login_pwd)
+                    if success:
+                        st.session_state.authenticated = True
+                        st.session_state.user = user_data
+                        st.session_state.page = 'Dashboard'
+                        st.success("Authentication successful! Loading dashboard...")
+                        st.rerun()
                     else:
-                        success, message, user_data = authenticate_user(login_ident, login_pwd)
-                        if success:
-                            st.session_state.authenticated = True
-                            st.session_state.user = user_data
-                            st.session_state.page = 'Dashboard'
-                            st.success("Authentication successful! Loading dashboard...")
-                            st.rerun()
-                        else:
-                            st.error(message)
+                        st.error(message)
             
             # Quick Demo Login Helper for seamless evaluation
             st.markdown("---")
             col_demo1, col_demo2 = st.columns(2)
             with col_demo1:
-                if st.button("🔑 Try as Demo User 1", use_container_width=True):
+                if st.button("🔑 Try as Demo User 1", use_container_width=True, key="btn_quick_demo_1"):
                     register_user("demo_analyst", "demo1@reviewinsight.local", "Password123!")
                     _, _, u_data = authenticate_user("demo_analyst", "Password123!")
                     if u_data:
@@ -151,7 +184,7 @@ def render_auth_page():
                         st.session_state.user = u_data
                         st.rerun()
             with col_demo2:
-                if st.button("👤 Try as Demo User 2", use_container_width=True):
+                if st.button("👤 Try as Demo User 2", use_container_width=True, key="btn_quick_demo_2"):
                     register_user("test_evaluator", "demo2@reviewinsight.local", "Password123!")
                     _, _, u_data = authenticate_user("test_evaluator", "Password123!")
                     if u_data:
@@ -164,45 +197,115 @@ def render_auth_page():
             st.markdown("##### New User Registration")
             st.caption("Create a separate account. All your data, uploads, and history remain strictly private.")
             
-            with st.form("register_form", clear_on_submit=False):
-                reg_username = st.text_input("Username", placeholder="e.g., alex_insights (alphanumeric, min 3 chars)")
-                reg_email = st.text_input("Email Address", placeholder="e.g., alex@company.com")
-                reg_pwd = st.text_input("Password", type="password", placeholder="At least 6 characters")
-                reg_confirm = st.text_input("Confirm Password", type="password", placeholder="Re-enter password")
-                reg_submit = st.form_submit_button("Create My Account", use_container_width=True)
+            reg_username = st.text_input("Username", placeholder="e.g., alex_insights (alphanumeric, min 3 chars)", key="auth_reg_user")
+            reg_email = st.text_input("Email Address", placeholder="e.g., alex@company.com", key="auth_reg_email")
+            
+            # Registration Password with eye icon
+            col_rpwd, col_reye = st.columns([7, 1])
+            with col_rpwd:
+                is_rpwd_visible = st.session_state.show_reg_pwd
+                reg_pwd = st.text_input(
+                    "Password",
+                    type="text" if is_rpwd_visible else "password",
+                    placeholder="At least 6 characters",
+                    key="auth_reg_pwd"
+                )
+            with col_reye:
+                st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+                st.markdown("<div class='eye-toggle-btn'>", unsafe_allow_html=True)
+                if st.button("👁️" if not is_rpwd_visible else "🙈", key="btn_eye_reg_pwd", help="Toggle password visibility"):
+                    st.session_state.show_reg_pwd = not is_rpwd_visible
+                    st.rerun()
+                st.markdown("</div>", unsafe_allow_html=True)
                 
-                if reg_submit:
-                    if reg_pwd != reg_confirm:
-                        st.error("Passwords do not match. Please re-enter your password.")
+            # Registration Confirm Password with eye icon
+            col_rcpwd, col_rceye = st.columns([7, 1])
+            with col_rcpwd:
+                is_rconf_visible = st.session_state.show_reg_conf
+                reg_confirm = st.text_input(
+                    "Confirm Password",
+                    type="text" if is_rconf_visible else "password",
+                    placeholder="Re-enter password",
+                    key="auth_reg_confirm"
+                )
+            with col_rceye:
+                st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+                st.markdown("<div class='eye-toggle-btn'>", unsafe_allow_html=True)
+                if st.button("👁️" if not is_rconf_visible else "🙈", key="btn_eye_reg_conf", help="Toggle password visibility"):
+                    st.session_state.show_reg_conf = not is_rconf_visible
+                    st.rerun()
+                st.markdown("</div>", unsafe_allow_html=True)
+                
+            st.write("")
+            reg_submit = st.button("Create My Account", use_container_width=True, type="primary", key="btn_auth_register")
+            
+            if reg_submit:
+                if reg_pwd != reg_confirm:
+                    st.error("Passwords do not match. Please re-enter your password.")
+                else:
+                    success, message, new_user_id = register_user(reg_username, reg_email, reg_pwd)
+                    if success:
+                        st.success(message)
+                        info_box("Account registered successfully! Please click the 'Sign In' tab to log in.", "success")
                     else:
-                        success, message, new_user_id = register_user(reg_username, reg_email, reg_pwd)
-                        if success:
-                            st.success(message)
-                            info_box("Account registered successfully! Please click the 'Sign In' tab to log in.", "success")
-                        else:
-                            st.error(message)
+                        st.error(message)
 
         # TAB 3: RESET PASSWORD
         with auth_tab3:
             st.markdown("##### Reset Account Password")
             st.caption("Forgot your password or want to update it? Enter your username or email and your new password.")
             
-            with st.form("reset_pwd_form", clear_on_submit=False):
-                reset_ident = st.text_input("Username or Email Address", placeholder="e.g., swetha20 or swetha@gmail.com")
-                reset_new_pwd = st.text_input("New Password", type="password", placeholder="At least 6 characters")
-                reset_confirm_pwd = st.text_input("Confirm New Password", type="password", placeholder="Re-enter new password")
-                reset_submit = st.form_submit_button("Update Password", use_container_width=True)
+            reset_ident = st.text_input("Username or Email Address", placeholder="e.g., swetha20 or swetha@gmail.com", key="auth_reset_ident")
+            
+            # Reset Password with eye icon
+            col_rstpwd, col_rsteye = st.columns([7, 1])
+            with col_rstpwd:
+                is_rstpwd_visible = st.session_state.show_reset_pwd
+                reset_new_pwd = st.text_input(
+                    "New Password",
+                    type="text" if is_rstpwd_visible else "password",
+                    placeholder="At least 6 characters",
+                    key="auth_reset_pwd"
+                )
+            with col_rsteye:
+                st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+                st.markdown("<div class='eye-toggle-btn'>", unsafe_allow_html=True)
+                if st.button("👁️" if not is_rstpwd_visible else "🙈", key="btn_eye_reset_pwd", help="Toggle password visibility"):
+                    st.session_state.show_reset_pwd = not is_rstpwd_visible
+                    st.rerun()
+                st.markdown("</div>", unsafe_allow_html=True)
                 
-                if reset_submit:
-                    if reset_new_pwd != reset_confirm_pwd:
-                        st.error("New passwords do not match. Please re-enter.")
+            # Reset Confirm Password with eye icon
+            col_rstcpwd, col_rstceye = st.columns([7, 1])
+            with col_rstcpwd:
+                is_rstconf_visible = st.session_state.show_reset_conf
+                reset_confirm_pwd = st.text_input(
+                    "Confirm New Password",
+                    type="text" if is_rstconf_visible else "password",
+                    placeholder="Re-enter new password",
+                    key="auth_reset_confirm"
+                )
+            with col_rstceye:
+                st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+                st.markdown("<div class='eye-toggle-btn'>", unsafe_allow_html=True)
+                if st.button("👁️" if not is_rstconf_visible else "🙈", key="btn_eye_reset_conf", help="Toggle password visibility"):
+                    st.session_state.show_reset_conf = not is_rstconf_visible
+                    st.rerun()
+                st.markdown("</div>", unsafe_allow_html=True)
+                
+            st.write("")
+            reset_submit = st.button("Update Password", use_container_width=True, type="primary", key="btn_auth_reset")
+            
+            if reset_submit:
+                if reset_new_pwd != reset_confirm_pwd:
+                    st.error("New passwords do not match. Please re-enter.")
+                else:
+                    success, message = reset_user_password(reset_ident, reset_new_pwd)
+                    if success:
+                        st.success(message)
+                        info_box("Your password has been updated. Switch to the 'Sign In' tab to log in.", "success")
                     else:
-                        success, message = reset_user_password(reset_ident, reset_new_pwd)
-                        if success:
-                            st.success(message)
-                            info_box("Your password has been updated. Switch to the 'Sign In' tab to log in.", "success")
-                        else:
-                            st.error(message)
+                        st.error(message)
 
 
 # =====================================================================
@@ -894,11 +997,51 @@ def render_analyzer():
         uploaded_file = st.file_uploader(
             "Select review data file to upload",
             type=['csv', 'xlsx', 'xls'],
-            help="Upload your customer reviews CSV or Excel spreadsheet"
+            help="Upload your customer reviews CSV or Excel spreadsheet",
+            key="file_uploader_batch"
         )
         
         if uploaded_file:
             parse_success, parse_msg, raw_df = parse_uploaded_file(uploaded_file)
+            
+            # Prominent, high-contrast filename display card (Requirement 3)
+            file_bytes = uploaded_file.getvalue() if hasattr(uploaded_file, 'getvalue') else None
+            file_size_bytes = len(file_bytes) if file_bytes is not None else getattr(uploaded_file, 'size', 0)
+            file_size_str = f"{file_size_bytes / 1024:.1f} KB" if file_size_bytes < 1024*1024 else f"{file_size_bytes / (1024*1024):.2f} MB"
+            file_ext = uploaded_file.name.split('.')[-1].upper()
+            row_count_display = len(raw_df) if parse_success and raw_df is not None else 0
+            col_count_display = len(raw_df.columns) if parse_success and raw_df is not None else 0
+            
+            st.markdown(
+                f"""
+                <div style="background: linear-gradient(135deg, rgba(30, 41, 59, 0.95) 0%, rgba(19, 27, 46, 0.98) 100%); 
+                            border: 1px solid rgba(99, 102, 241, 0.45); border-radius: 14px; padding: 16px 22px; 
+                            margin: 14px 0 18px 0; box-shadow: 0 6px 20px rgba(0,0,0,0.35);">
+                    <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px;">
+                        <div style="display: flex; align-items: center; gap: 14px;">
+                            <span style="font-size: 32px;">📄</span>
+                            <div>
+                                <div style="color: #F8FAFC; font-weight: 700; font-size: 16px; letter-spacing: 0.3px;">
+                                    {html.escape(uploaded_file.name)}
+                                </div>
+                                <div style="color: #94A3B8; font-size: 13px; margin-top: 4px;">
+                                    File Size: <strong style="color: #F8FAFC;">{file_size_str}</strong> &nbsp;|&nbsp; 
+                                    Format: <code style="color: #818CF8; background: rgba(99, 102, 241, 0.2); padding: 2px 7px; border-radius: 4px;">.{file_ext}</code> &nbsp;|&nbsp; 
+                                    Parsed Rows: <strong style="color: #34D399;">{row_count_display}</strong> &nbsp;|&nbsp; 
+                                    Columns: <strong style="color: #38BDF8;">{col_count_display}</strong>
+                                </div>
+                            </div>
+                        </div>
+                        <div>
+                            <span class="badge {'badge-positive' if parse_success else 'badge-negative'}">
+                                {'✓ File Ready for Analysis' if parse_success else '⚠️ Parse Error'}
+                            </span>
+                        </div>
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
             
             if not parse_success:
                 st.error(f"❌ {parse_msg}")
@@ -908,8 +1051,6 @@ def render_analyzer():
                 if not is_valid:
                     st.error(f"❌ Validation Failed: {validation_err}")
                 else:
-                    st.success(f"✓ File parsed successfully: Found {len(raw_df)} rows and {len(raw_df.columns)} columns.")
-                    
                     st.markdown("###### Preview of Uploaded Data (First 5 Rows)")
                     st.dataframe(raw_df.head(), use_container_width=True)
                     
@@ -1088,13 +1229,25 @@ def render_data():
         
     df = pd.DataFrame(all_reviews)
     
+    # Generate honest recommendation for each review based strictly on actual content & sentiment (Requirement 5)
+    df['My Recommendation'] = df.apply(
+        lambda row: generate_review_recommendation(
+            row.get('review_text', ''),
+            row.get('rating'),
+            row.get('sentiment'),
+            row.get('polarity')
+        ),
+        axis=1
+    )
+    
     col_f1, col_f2, col_f3, col_f4 = st.columns(4)
     with col_f1:
         search_kw = st.text_input("🔍 Search Reviews", placeholder="Keyword, product name...")
     with col_f2:
         prod_filter = st.selectbox("Product", ["All Products"] + get_products(user_id))
     with col_f3:
-        sent_filter = st.selectbox("Sentiment", ["All Sentiments", "Positive", "Negative", "Neutral"])
+        # Replaced Sentiment filter with My Recommendation filter (Requirement 5)
+        rec_filter = st.selectbox("My Recommendation", ["All Recommendations", "Recommended", "Not Recommended", "Mixed"])
     with col_f4:
         class_filter = st.selectbox("Classification", ["All Classifications", "Genuine-looking", "Suspicious"])
         
@@ -1109,8 +1262,8 @@ def render_data():
     if prod_filter != "All Products":
         filtered_df = filtered_df[filtered_df['product_name'] == prod_filter]
         
-    if sent_filter != "All Sentiments":
-        filtered_df = filtered_df[filtered_df['sentiment'] == sent_filter]
+    if rec_filter != "All Recommendations":
+        filtered_df = filtered_df[filtered_df['My Recommendation'].str.startswith(rec_filter)]
         
     if class_filter != "All Classifications":
         filtered_df = filtered_df[filtered_df['classification'] == class_filter]
@@ -1118,16 +1271,56 @@ def render_data():
     st.caption(f"Showing {len(filtered_df)} of {len(df)} total reviews in your account.")
     
     if not filtered_df.empty:
+        # Product-level Recommendation Summary based strictly on actual review content (Requirement 5)
+        prod_rec = generate_product_recommendation(filtered_df.to_dict('records'))
+        
+        verdict_badge_color = {
+            "Recommended": "badge-positive",
+            "Not Recommended": "badge-negative",
+            "Mixed": "badge-neutral"
+        }.get(prod_rec['verdict'], 'badge-neutral')
+        
+        st.markdown(
+            f"""
+            <div style="background: linear-gradient(145deg, #131B2E 0%, #0F172A 100%); 
+                        border: 1px solid rgba(99, 102, 241, 0.35); 
+                        border-left: 5px solid {'#10B981' if prod_rec['verdict']=='Recommended' else ('#EF4444' if prod_rec['verdict']=='Not Recommended' else '#F59E0B')};
+                        border-radius: 14px; padding: 18px 22px; margin-bottom: 20px;">
+                <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 8px;">
+                    <div style="display: flex; align-items: center; gap: 10px;">
+                        <span style="font-size: 24px;">💡</span>
+                        <span style="color: #F8FAFC; font-weight: 700; font-size: 17px;">
+                            Product Recommendation: {prod_rec['headline']}
+                        </span>
+                    </div>
+                    <span class="badge {verdict_badge_color}">
+                        {'✅' if prod_rec['verdict']=='Recommended' else ('❌' if prod_rec['verdict']=='Not Recommended' else '⚖️')} {prod_rec['verdict']}
+                    </span>
+                </div>
+                <p style="color: #E2E8F0; font-size: 14px; margin: 4px 0 10px 0; line-height: 1.6;">
+                    {html.escape(prod_rec['explanation'])}
+                </p>
+                <div style="display: flex; gap: 18px; flex-wrap: wrap; font-size: 13px; color: #94A3B8; margin-top: 8px; border-top: 1px solid rgba(255,255,255,0.06); padding-top: 8px;">
+                    <span>🟢 Recommended: <strong style="color: #34D399;">{prod_rec['rec_count']}</strong> ({prod_rec['rec_pct']:.0f}%)</span>
+                    <span>🔴 Not Recommended: <strong style="color: #F87171;">{prod_rec['not_rec_count']}</strong> ({prod_rec['not_rec_pct']:.0f}%)</span>
+                    <span>🟡 Mixed: <strong style="color: #FBBF24;">{prod_rec['mixed_count']}</strong> ({prod_rec['mixed_pct']:.0f}%)</span>
+                    <span>⭐ Avg Rating: <strong style="color: #F8FAFC;">{f"{prod_rec['avg_rating']:.1f} / 5" if prod_rec['avg_rating'] else "N/A"}</strong></span>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+        
+        # In the review data table: Removed 'sentiment' column and replaced with 'My Recommendation' (Requirement 5)
         display_df = filtered_df[[
-            'id', 'product_name', 'review_text', 'rating', 'sentiment',
+            'id', 'product_name', 'review_text', 'rating', 'My Recommendation',
             'classification', 'suspicion_score', 'created_at'
         ]].copy()
         
-        display_df['sentiment'] = display_df['sentiment'].apply(sentiment_badge)
         display_df['classification'] = display_df['classification'].apply(status_badge)
         display_df['rating'] = display_df['rating'].apply(display_rating_stars)
         
-        st.dataframe(display_df, use_container_width=True, height=420)
+        st.dataframe(display_df, use_container_width=True, height=440)
         
         col_down, _ = st.columns([1, 2])
         with col_down:
@@ -1422,35 +1615,39 @@ def render_analytics():
 # =====================================================================
 
 def render_about():
-    """Render comprehensive project documentation."""
+    """Render comprehensive project documentation with high-contrast, clearly visible typography and cards."""
     st.markdown(
         """
-        <div style="margin-bottom: 20px;">
-            <h1 style="color: #F8FAFC; margin: 0; font-size: 26px; font-weight: 700;">ℹ️ About Amazon Review Insight Pro Analyzer</h1>
-            <p style="color: #94A3B8; margin: 4px 0 0 0; font-size: 14px;">
-                Architecture, heuristic rules, data authenticity guarantees, and deployment readiness
+        <div style="margin-bottom: 24px;">
+            <h1 style="color: #F8FAFC; margin: 0; font-size: 28px; font-weight: 700;">ℹ️ About Amazon Review Insight Pro Analyzer</h1>
+            <p style="color: #94A3B8; margin: 6px 0 0 0; font-size: 15px;">
+                Architecture, 7-factor heuristic detection, real-time product recommendations, security, and operational workflows
             </p>
         </div>
         """,
         unsafe_allow_html=True
     )
     
+    # ROW 1: MISSION & TECHNICAL ARCHITECTURE
     col_a1, col_a2 = st.columns(2)
     with col_a1:
         st.markdown(
             """
-            <div class="dark-card">
-                <h3 style="color: #F8FAFC; font-size: 18px; margin-top: 0;">🎯 Project Mission</h3>
-                <p style="color: #94A3B8; font-size: 14px; line-height: 1.6;">
-                    <strong>Amazon Review Insight Pro Analyzer</strong> is an enterprise-grade platform 
-                    engineered to analyze consumer review corpora, measure multi-dimensional sentiment polarity, 
-                    and detect anomalous or suspicious review patterns using a 7-factor heuristic detection framework.
+            <div class="about-card">
+                <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 12px;">
+                    <span style="font-size: 24px;">🎯</span>
+                    <h3 style="color: #F8FAFC; font-size: 18px; margin: 0; font-weight: 700;">Project Mission & Problem Statement</h3>
+                </div>
+                <p style="color: #E2E8F0; font-size: 14px; line-height: 1.65; margin-bottom: 12px;">
+                    E-commerce platforms like Amazon contain millions of product reviews, but a significant portion 
+                    are fabricated, incentivized, or machine-generated spam. Consumers and business analysts struggle 
+                    to separate authentic user experiences from coordinated astroturfing campaigns.
                 </p>
-                <h4 style="color: #F8FAFC; font-size: 15px; margin-top: 16px;">🛡️ Data Authenticity Standard</h4>
-                <p style="color: #94A3B8; font-size: 14px; line-height: 1.6;">
-                    Our platform strictly forbids simulated, mock, or fake reviews. When analyzing Amazon listings,
-                    if automated scraping is challenged by anti-bot verification, the platform reports honestly
-                    and provides direct product links for manual import rather than inventing fabricated metrics.
+                <p style="color: #E2E8F0; font-size: 14px; line-height: 1.65; margin: 0;">
+                    <strong>Amazon Review Insight Pro Analyzer</strong> provides an automated, objective evaluation platform. 
+                    It ingests customer reviews directly from Amazon product URLs or batch CSV/Excel files, measures multi-dimensional 
+                    sentiment polarity, flags suspicious review anomalies using 7 linguistic heuristics, and delivers honest 
+                    product recommendations strictly grounded in real customer comments.
                 </p>
             </div>
             """,
@@ -1459,39 +1656,162 @@ def render_about():
     with col_a2:
         st.markdown(
             """
-            <div class="dark-card">
-                <h3 style="color: #F8FAFC; font-size: 18px; margin-top: 0;">🛠️ Technical Architecture</h3>
-                <ul style="color: #94A3B8; font-size: 14px; line-height: 1.7; padding-left: 20px; margin: 0;">
-                    <li><strong>Framework:</strong> Python 3.10+ & Streamlit</li>
-                    <li><strong>Security:</strong> PBKDF2-HMAC-SHA256 password hashing with unique salt</li>
-                    <li><strong>Data Isolation:</strong> Relational SQLite with strict user-scoped foreign keys</li>
-                    <li><strong>Sentiment Engine:</strong> TextBlob polarity and subjectivity analysis</li>
-                    <li><strong>NLP Tokenization:</strong> spaCy English model for linguistic extraction</li>
-                    <li><strong>Visualizations:</strong> Interactive Plotly Dark theme suite</li>
+            <div class="about-card">
+                <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 12px;">
+                    <span style="font-size: 24px;">🛠️</span>
+                    <h3 style="color: #F8FAFC; font-size: 18px; margin: 0; font-weight: 700;">Core Technology Stack</h3>
+                </div>
+                <ul style="color: #E2E8F0; font-size: 14px; line-height: 1.75; padding-left: 20px; margin: 0;">
+                    <li><strong style="color: #F8FAFC;">Application Frontend:</strong> Streamlit with responsive custom dark theme, Poppins typography, and tabbed navigation</li>
+                    <li><strong style="color: #F8FAFC;">NLP & Sentiment Analysis:</strong> TextBlob (Polarity & Subjectivity) & spaCy (Tokenization & Noun Phrase Extraction)</li>
+                    <li><strong style="color: #F8FAFC;">Web Scraping:</strong> BeautifulSoup4 & Requests Session with browser simulation headers</li>
+                    <li><strong style="color: #F8FAFC;">Data Storage:</strong> Relational SQLite database with strict foreign-key user account data isolation</li>
+                    <li><strong style="color: #F8FAFC;">Security & Authentication:</strong> PBKDF2-HMAC-SHA256 password hashing with 100,000 iterations and unique cryptographic salts</li>
+                    <li><strong style="color: #F8FAFC;">Data Visualizations:</strong> Interactive Plotly Dark theme suite (pie charts, histograms, keyword frequency distributions)</li>
                 </ul>
             </div>
             """,
             unsafe_allow_html=True
         )
         
-    st.markdown("#### 🔍 The 7 Heuristic Suspicion Rules")
+    # ROW 2: THE 7 HEURISTIC SUSPICION RULES
     st.markdown(
         """
-        The authenticity detector evaluates every review against 7 independent linguistic indicators:
-        
-        1. **Very Short Review (< 5 words):** Extremely terse feedback often indicates automated bot activity.
-        2. **Excessive Repeated Words (30%+):** Repetitive token spam frequently found in incentivized reviews.
-        3. **Excessive Capitalization (> 50% uppercase):** Over-capitalization used to artificially grab visual attention.
-        4. **Excessive Exclamation Marks (3+):** Over-punctuated enthusiasm commonly seen in promotional campaigns.
-        5. **Repeated Promotional Phrases:** Keywords such as 'must buy', 'best product ever', 'act now'.
-        6. **Hyperbolic Extreme Language:** Overuse of extreme superlatives like 'phenomenal', 'horrible', 'perfect'.
-        7. **Corpus Duplicate Similarity (85%+ ratio):** High cross-review similarity indicating coordinated campaign copy-paste.
-        
-        **Classification Scoring:**
-        - **0 to 2 Rules Triggered:** Classified as <code>Genuine-looking</code>.
-        - **3 or More Rules Triggered:** Classified as <code>Suspicious</code>.
-        """
+        <div class="about-card">
+            <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 14px;">
+                <span style="font-size: 24px;">🔍</span>
+                <h3 style="color: #F8FAFC; font-size: 18px; margin: 0; font-weight: 700;">The 7 Linguistic Suspicion Rules & Classification Framework</h3>
+            </div>
+            <p style="color: #E2E8F0; font-size: 14px; line-height: 1.6; margin-bottom: 16px;">
+                Every review in the corpus is objectively analyzed against 7 independent linguistic anomaly checks:
+            </p>
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; margin-bottom: 18px;">
+                <div style="background: rgba(30, 41, 59, 0.6); padding: 12px 16px; border-radius: 10px; border: 1px solid rgba(255, 255, 255, 0.08);">
+                    <div style="color: #F8FAFC; font-weight: 600; font-size: 14px;">1. Very Short Review (&lt; 5 words)</div>
+                    <div style="color: #94A3B8; font-size: 12px; margin-top: 4px;">Extremely terse reviews often lack authentic detail and may indicate automated bot spam.</div>
+                </div>
+                <div style="background: rgba(30, 41, 59, 0.6); padding: 12px 16px; border-radius: 10px; border: 1px solid rgba(255, 255, 255, 0.08);">
+                    <div style="color: #F8FAFC; font-weight: 600; font-size: 14px;">2. Excessive Repeated Words (≥ 30%)</div>
+                    <div style="color: #94A3B8; font-size: 12px; margin-top: 4px;">Repetitive word stuffing commonly found in keyword-targeted incentivized reviews.</div>
+                </div>
+                <div style="background: rgba(30, 41, 59, 0.6); padding: 12px 16px; border-radius: 10px; border: 1px solid rgba(255, 255, 255, 0.08);">
+                    <div style="color: #F8FAFC; font-weight: 600; font-size: 14px;">3. Excessive Capitalization (&gt; 50%)</div>
+                    <div style="color: #94A3B8; font-size: 12px; margin-top: 4px;">All-caps text engineered to artificially hijack consumer visual attention.</div>
+                </div>
+                <div style="background: rgba(30, 41, 59, 0.6); padding: 12px 16px; border-radius: 10px; border: 1px solid rgba(255, 255, 255, 0.08);">
+                    <div style="color: #F8FAFC; font-weight: 600; font-size: 14px;">4. Excessive Exclamations (≥ 3 marks)</div>
+                    <div style="color: #94A3B8; font-size: 12px; margin-top: 4px;">Over-punctuated synthetic enthusiasm characteristic of promotional review rings.</div>
+                </div>
+                <div style="background: rgba(30, 41, 59, 0.6); padding: 12px 16px; border-radius: 10px; border: 1px solid rgba(255, 255, 255, 0.08);">
+                    <div style="color: #F8FAFC; font-weight: 600; font-size: 14px;">5. Promotional Keyword Phrases</div>
+                    <div style="color: #94A3B8; font-size: 12px; margin-top: 4px;">Canned slogans such as 'must buy', 'best product ever', 'act now', '100% genuine'.</div>
+                </div>
+                <div style="background: rgba(30, 41, 59, 0.6); padding: 12px 16px; border-radius: 10px; border: 1px solid rgba(255, 255, 255, 0.08);">
+                    <div style="color: #F8FAFC; font-weight: 600; font-size: 14px;">6. Hyperbolic Extreme Language</div>
+                    <div style="color: #94A3B8; font-size: 12px; margin-top: 4px;">Overuse of polarized superlatives ('phenomenal', 'horrible', 'perfect', 'garbage').</div>
+                </div>
+                <div style="background: rgba(30, 41, 59, 0.6); padding: 12px 16px; border-radius: 10px; border: 1px solid rgba(255, 255, 255, 0.08);">
+                    <div style="color: #F8FAFC; font-weight: 600; font-size: 14px;">7. Corpus Duplicate Similarity (≥ 85%)</div>
+                    <div style="color: #94A3B8; font-size: 12px; margin-top: 4px;">Near-identical text copies across multiple reviews signaling coordinated copy-paste campaigns.</div>
+                </div>
+            </div>
+            <div style="background: rgba(99, 102, 241, 0.1); border: 1px solid rgba(99, 102, 241, 0.3); border-radius: 10px; padding: 14px 18px;">
+                <div style="color: #F8FAFC; font-weight: 700; font-size: 14px; margin-bottom: 4px;">Classification Thresholds:</div>
+                <div style="color: #E2E8F0; font-size: 13px; line-height: 1.6;">
+                    • <span class="badge badge-genuine">Genuine-looking</span>: <strong>0 to 2 rules triggered</strong> (Natural, varied linguistic expression)<br>
+                    • <span class="badge badge-suspicious">Suspicious</span>: <strong>3 or more rules triggered</strong> (Displays cumulative statistical anomalies)
+                </div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True
     )
+    
+    # ROW 3: RECOMMENDATION ENGINE & DATA AUTHENTICITY
+    col_r1, col_r2 = st.columns(2)
+    with col_r1:
+        st.markdown(
+            """
+            <div class="about-card">
+                <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 12px;">
+                    <span style="font-size: 24px;">💡</span>
+                    <h3 style="color: #F8FAFC; font-size: 18px; margin: 0; font-weight: 700;">Product Recommendation Engine</h3>
+                </div>
+                <p style="color: #E2E8F0; font-size: 14px; line-height: 1.65; margin-bottom: 12px;">
+                    Instead of displaying a raw sentiment label, the Review Data management view features 
+                    <strong>My Recommendation</strong>:
+                </p>
+                <div style="color: #E2E8F0; font-size: 13px; line-height: 1.7;">
+                    • <span class="badge badge-positive">✅ Recommended</span>: Supported by customer ratings ≥ 4.0★ and positive sentiment, quoting genuine user highlights.<br>
+                    • <span class="badge badge-negative">❌ Not Recommended</span>: Triggered by ratings ≤ 2.0★ or negative sentiment, citing specific reported defects.<br>
+                    • <span class="badge badge-neutral">⚖️ Mixed</span>: Assigned to balanced 3★ reviews or divided feedback noting both pros and cons.
+                </div>
+                <div style="margin-top: 12px; color: #94A3B8; font-size: 12px; font-style: italic;">
+                    All explanations cite the customer's actual words. The system never fabricates explanations.
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+    with col_r2:
+        st.markdown(
+            """
+            <div class="about-card">
+                <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 12px;">
+                    <span style="font-size: 24px;">🛡️</span>
+                    <h3 style="color: #F8FAFC; font-size: 18px; margin: 0; font-weight: 700;">Strict Data Authenticity Policy</h3>
+                </div>
+                <p style="color: #E2E8F0; font-size: 14px; line-height: 1.65; margin-bottom: 12px;">
+                    This platform adheres to a zero-tolerance policy against simulated, mock, or fake reviews:
+                </p>
+                <ul style="color: #E2E8F0; font-size: 13px; line-height: 1.7; padding-left: 20px; margin: 0;">
+                    <li><strong style="color: #F8FAFC;">Real Reviews Only:</strong> URL analysis extracts ONLY the actual reviews present on the Amazon listing page.</li>
+                    <li><strong style="color: #F8FAFC;">No Mock Fallbacks:</strong> If scraping is restricted, the platform never injects fake reviews from other products.</li>
+                    <li><strong style="color: #F8FAFC;">Any Valid Amazon URL:</strong> Accepts all Amazon global domains (.com, .in, .co.uk, .de, .ca, etc.) with or without slugs.</li>
+                    <li><strong style="color: #F8FAFC;">Honest Reporting:</strong> When Amazon anti-bot systems block automated access, the system informs the user transparently.</li>
+                </ul>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+        
+    # ROW 4: SECURITY & KNOWN LIMITATIONS
+    col_s1, col_s2 = st.columns(2)
+    with col_s1:
+        st.markdown(
+            """
+            <div class="about-card">
+                <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 12px;">
+                    <span style="font-size: 24px;">🔐</span>
+                    <h3 style="color: #F8FAFC; font-size: 18px; margin: 0; font-weight: 700;">Security & Data Isolation</h3>
+                </div>
+                <ul style="color: #E2E8F0; font-size: 13px; line-height: 1.7; padding-left: 20px; margin: 0;">
+                    <li><strong style="color: #F8FAFC;">Password Encryption:</strong> Uses PBKDF2-HMAC-SHA256 with 100,000 rounds and unique random 16-byte hex salts.</li>
+                    <li><strong style="color: #F8FAFC;">Zero Cleartext:</strong> Plaintext passwords are never logged, stored, or exposed in error traces.</li>
+                    <li><strong style="color: #F8FAFC;">Strict Account Isolation:</strong> All reviews, uploads, and history queries are filtered by user ID.</li>
+                    <li><strong style="color: #F8FAFC;">Eye Icon Visibility:</strong> Password fields feature interactive eye icons (👁️) to show/hide securely without text leaks.</li>
+                </ul>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+    with col_s2:
+        st.markdown(
+            """
+            <div class="about-card">
+                <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 12px;">
+                    <span style="font-size: 24px;">⚡</span>
+                    <h3 style="color: #F8FAFC; font-size: 18px; margin: 0; font-weight: 700;">Operational Scope & Limitations</h3>
+                </div>
+                <ul style="color: #E2E8F0; font-size: 13px; line-height: 1.7; padding-left: 20px; margin: 0;">
+                    <li><strong style="color: #F8FAFC;">Amazon JavaScript Hydration:</strong> Some Amazon pages dynamically load reviews via client-side scripts. Static HTML scraping extracts top visible reviews; full datasets can be analyzed via CSV upload.</li>
+                    <li><strong style="color: #F8FAFC;">Anti-Bot Defense (Robot Check):</strong> Amazon may temporarily challenge requests with CAPTCHAs. The platform detects this and guides users to import genuine reviews via CSV.</li>
+                    <li><strong style="color: #F8FAFC;">NLP Model:</strong> TextBlob polarity is lexicon-based; sarcasm or complex contextual irony may occasionally score as neutral.</li>
+                </ul>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
 
 
 # =====================================================================

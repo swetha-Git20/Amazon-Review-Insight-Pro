@@ -58,9 +58,10 @@ DEMO_PRODUCTS = [
 
 def extract_amazon_details(url: str) -> Dict[str, Optional[str]]:
     """
-    Parse an Amazon URL to extract the ASIN, marketplace domain, and canonical URL.
+    Parse any valid Amazon product URL to extract the ASIN, marketplace domain, and canonical URL.
     
-    Why: Supports all international Amazon domains and URL formats (with or without slugs).
+    Why: Supports all international Amazon domains, URL formats (with/without slugs, queries),
+    missing http/https protocols, and shortened Amazon links (a.co, amzn.to).
     
     Input: url (str) - Any Amazon product link
     Output: Dict containing is_valid, asin, domain, and canonical_url
@@ -70,16 +71,73 @@ def extract_amazon_details(url: str) -> Dict[str, Optional[str]]:
     
     url = url.strip()
     
+    # Auto-prefix protocol if missing (e.g. amazon.com/dp/B0863TXGM3)
+    if not url.startswith(('http://', 'https://')):
+        url = 'https://' + url
+        
+    try:
+        from urllib.parse import urlparse, parse_qs
+        parsed = urlparse(url)
+        hostname = (parsed.netloc or '').lower()
+    except Exception:
+        hostname = ''
+        parsed = None
+    
+    # Handle shortened Amazon domains (e.g. a.co/d/..., amzn.to/...)
+    if any(short in hostname for short in ['a.co', 'amzn.to', 'amzn.in', 'amzn.eu']):
+        try:
+            resp = requests.head(url, allow_redirects=True, timeout=5)
+            if resp.url and resp.url != url:
+                url = resp.url
+                parsed = urlparse(url)
+                hostname = (parsed.netloc or '').lower()
+        except Exception:
+            pass
+
     # Extract marketplace domain
-    domain_match = re.search(AMAZON_DOMAIN_PATTERN, url, re.IGNORECASE)
-    domain = domain_match.group(1).lower() if domain_match else None
-    
-    # Extract ASIN
-    asin_match = re.search(ASIN_PATTERN, url, re.IGNORECASE)
-    asin = asin_match.group(1).upper() if asin_match else None
-    
+    domain = None
+    if 'amazon.' in hostname:
+        domain_match = re.search(r'(amazon\.[a-z\.]+)', hostname)
+        if domain_match:
+            domain = domain_match.group(1).lower()
+    if not domain:
+        # Fallback regex search on the entire URL
+        domain_match = re.search(AMAZON_DOMAIN_PATTERN, url, re.IGNORECASE)
+        if domain_match:
+            domain = domain_match.group(1).lower()
+            
+    # Extract 10-character ASIN
+    asin = None
+    # 1. Standard path structures: /dp/ASIN, /gp/product/ASIN, /gp/aw/d/ASIN, /product-reviews/ASIN, /product/ASIN, /d/ASIN, /ASIN/ASIN
+    path_str = parsed.path if parsed else url
+    path_match = re.search(
+        r'(?:/dp/|/gp/product/|/gp/aw/d/|/product-reviews/|/product/|/d/|/ASIN/|/)([A-Za-z0-9]{10})(?:[/?&#]|$)',
+        path_str,
+        re.IGNORECASE
+    )
+    if path_match:
+        asin = path_match.group(1).upper()
+    else:
+        # 2. Query parameter check (e.g. ?asin=B0863TXGM3 or &dp=B0863TXGM3)
+        if parsed and parsed.query:
+            qs = parse_qs(parsed.query)
+            for key in ['asin', 'ASIN', 'dp', 'product']:
+                if key in qs and qs[key]:
+                    val = qs[key][0].strip().upper()
+                    if re.match(r'^[A-Z0-9]{10}$', val):
+                        asin = val
+                        break
+        # 3. Direct general regex search anywhere in the URL
+        if not asin:
+            gen_match = re.search(r'(?:[/?&=]|^)([A-Za-z0-9]{10})(?:[/?&#]|$)', url)
+            if gen_match and domain:
+                candidate = gen_match.group(1).upper()
+                if not candidate.startswith(('HTTP', 'WWW', 'AMAZ')):
+                    asin = candidate
+                    
     is_valid = bool(domain and asin)
-    canonical_url = f"https://www.{domain}/dp/{asin}" if is_valid else url
+    canonical_domain = domain if domain else "amazon.com"
+    canonical_url = f"https://www.{canonical_domain}/dp/{asin}" if is_valid else url
     
     return {
         "is_valid": is_valid,
@@ -98,53 +156,15 @@ def validate_amazon_url(url: str) -> bool:
     return details["is_valid"]
 
 
-def get_verified_product_reviews(asin: str) -> Optional[Tuple[str, List[Dict]]]:
-    """
-    If live scraping is restricted by Amazon anti-bot systems, retrieve
-    the verified genuine review dataset for verified demonstration products.
-    Returns (product_title, list_of_reviews) or None.
-    """
-    verified_map = {
-        "B07PR1CL3S": ("boAt Rockerz 450 (Bluetooth On-Ear)", "boAt Rockerz 450 Bluetooth On-Ear Headphones"),
-        "B0863TXGM3": ("Sony WH-1000XM4 Wireless", "Sony WH-1000XM4 Wireless Premium Noise Canceling Headphones"),
-        "B08WM3LMJF": ("JBL Tune 510BT", "JBL Tune 510BT Wireless On-Ear Headphones"),
-        "B0BDHWDR12": ("UltraSonic Wireless Earbuds Pro", "UltraSonic Wireless Earbuds Pro"),
-    }
-    if asin not in verified_map:
-        return None
-    
-    csv_key, display_name = verified_map[asin]
-    sample_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data', 'sample_reviews.csv')
-    if not os.path.exists(sample_path):
-        return None
-    
-    try:
-        df = pd.read_csv(sample_path)
-        matching = df[df['product_name'] == csv_key]
-        if matching.empty:
-            return None
-        
-        reviews = []
-        for _, row in matching.iterrows():
-            reviews.append({
-                'review_text': str(row['review_text']),
-                'rating': float(row['rating']) if pd.notna(row['rating']) else None,
-                'product_name': display_name
-            })
-        return display_name, reviews
-    except Exception:
-        return None
-
-
 def fetch_reviews_from_url(url: str) -> Tuple[bool, str, Optional[List[Dict]], Optional[Dict]]:
     """
     Attempt to fetch genuine reviews directly from an Amazon product page.
     
     Strict Authenticity Policy:
-    - Extracts only real HTML reviews if Amazon grants access.
-    - If Amazon blocks the request with Robot Check / CAPTCHA / 503, report honestly
-      or load verified authentic dataset if this is a known product ASIN.
-    - NEVER generate fake, fabricated, or hardcoded reviews.
+    - Extracts ONLY real HTML customer reviews for that specific product.
+    - NEVER returns fake, mock, simulated, or extra reviews from other datasets.
+    - If Amazon blocks with Robot Check / CAPTCHA or dynamically hydrates via JavaScript,
+      reports honestly without generating synthetic reviews.
     
     Returns:
         Tuple[bool, str, Optional[List[Dict]], Optional[Dict]]
@@ -154,214 +174,213 @@ def fetch_reviews_from_url(url: str) -> Tuple[bool, str, Optional[List[Dict]], O
     if not details["is_valid"]:
         return (
             False,
-            "Invalid Amazon product link. Please ensure the URL includes a valid 10-character ASIN (e.g., https://www.amazon.com/dp/B0863TXGM3).",
+            "Invalid Amazon product link. Please ensure the URL is a valid Amazon product URL with an ASIN (e.g., https://www.amazon.com/dp/B0863TXGM3 or https://www.amazon.in/dp/B07PR1CL3S).",
             None,
             {"url": url}
         )
     
     target_url = details["canonical_url"]
     asin = details["asin"]
-    
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Cache-Control': 'no-cache',
-        'Pragma': 'no-cache',
-        'Sec-Ch-Ua': '"Chromium";v="124", "Google Chrome";v="124"',
-        'Sec-Ch-Ua-Mobile': '?0',
-        'Sec-Ch-Ua-Platform': '"Windows"',
-        'Sec-Fetch-Dest': 'document',
-        'Sec-Fetch-Mode': 'navigate',
-        'Sec-Fetch-Site': 'none',
-        'Sec-Fetch-User': '?1',
-        'Upgrade-Insecure-Requests': '1'
-    }
+    domain = details["domain"] or "amazon.com"
     
     meta = {
         "asin": asin,
-        "domain": details["domain"],
+        "domain": domain,
         "canonical_url": target_url,
         "input_url": url,
         "product_name": f"Amazon Product ({asin})"
     }
     
-    try:
-        response = requests.get(target_url, headers=headers, timeout=12)
-        
-        # Check for Amazon bot/CAPTCHA challenge
-        page_html = response.text
-        is_bot_check = (
-            "api-services-support@amazon.com" in page_html or
-            "Type the characters you see in this image" in page_html or
-            "To discuss automated access to Amazon data" in page_html or
-            "Robot Check" in page_html or
-            response.status_code in [403, 429, 503]
-        )
-        
-        if is_bot_check:
-            verified = get_verified_product_reviews(asin)
-            if verified:
-                p_name, revs = verified
-                meta["product_name"] = p_name
+    # Authentic browser headers
+    header_variants = [
+        {
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-User': '?1',
+            'Sec-Fetch-Dest': 'document',
+        },
+        {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Upgrade-Insecure-Requests': '1',
+        }
+    ]
+    
+    session = requests.Session()
+    
+    for h_idx, headers in enumerate(header_variants):
+        try:
+            response = session.get(target_url, headers=headers, timeout=12)
+            page_html = response.text
+            
+            # Check for Amazon bot/CAPTCHA challenge
+            is_bot_check = (
+                "api-services-support@amazon.com" in page_html or
+                "Type the characters you see in this image" in page_html or
+                "To discuss automated access to Amazon data" in page_html or
+                "Robot Check" in page_html or
+                response.status_code in [403, 429, 503]
+            )
+            
+            if is_bot_check:
+                # Try next header variant if available
+                if h_idx < len(header_variants) - 1:
+                    continue
                 return (
-                    True,
-                    f"Live web scraping was challenged by Amazon's anti-bot system. Loaded {len(revs)} verified actual customer reviews for '{p_name}' (ASIN {asin}).",
-                    revs,
+                    False,
+                    f"Amazon's automated anti-bot security (Robot Check / CAPTCHA) intercepted access for ASIN {asin}. "
+                    "In strict compliance with our data authenticity policy, this platform NEVER generates fake or hardcoded reviews. "
+                    "Please use the Batch Upload tab to analyze genuine reviews exported from Amazon.",
+                    None,
                     meta
                 )
-            return (
-                False,
-                f"Amazon's automated bot protection (CAPTCHA / Robot Check) intercepted the request for ASIN {asin}. "
-                "In strict compliance with our data authenticity standards, this system NEVER generates fake or hardcoded reviews. "
-                "Please click 'View Product on Amazon' to visit the official listing directly, or use our CSV upload option to analyze genuine customer reviews.",
-                None,
-                meta
-            )
-        
-        if response.status_code != 200:
-            verified = get_verified_product_reviews(asin)
-            if verified:
-                p_name, revs = verified
-                meta["product_name"] = p_name
+            
+            if response.status_code != 200:
+                if h_idx < len(header_variants) - 1:
+                    continue
                 return (
-                    True,
-                    f"Loaded {len(revs)} verified customer reviews for '{p_name}' (ASIN {asin}).",
-                    revs,
+                    False,
+                    f"Amazon server returned HTTP status {response.status_code}. The page could not be accessed directly.",
+                    None,
                     meta
                 )
-            return (
-                False,
-                f"Amazon server returned HTTP status code {response.status_code}. The page could not be accessed directly.",
-                None,
-                meta
-            )
-        
-        soup = BeautifulSoup(page_html, 'html.parser')
-        
-        # Extract actual product title if present
-        title_elem = soup.find('span', {'id': 'productTitle'}) or soup.find('h1', {'id': 'title'})
-        if title_elem:
-            product_name = title_elem.get_text(strip=True)
-            meta["product_name"] = product_name
-        
-        # Find review elements
-        review_elements = soup.find_all('div', {'data-hook': 'review'})
-        if not review_elements:
-            review_elements = soup.find_all('div', class_='review')
-        
-        if not review_elements:
-            verified = get_verified_product_reviews(asin)
-            if verified:
-                p_name, revs = verified
-                meta["product_name"] = p_name
+            
+            soup = BeautifulSoup(page_html, 'html.parser')
+            
+            # Extract actual product title from page
+            title_elem = soup.find('span', {'id': 'productTitle'}) or soup.find('h1', {'id': 'title'})
+            if not title_elem:
+                title_elem = soup.find('title')
+                if title_elem:
+                    raw_title = title_elem.get_text(strip=True)
+                    # Clean trailing Amazon branding
+                    clean_t = re.sub(r'\s*:\s*Amazon\..*$', '', raw_title, flags=re.I)
+                    clean_t = re.sub(r'^Amazon\.[a-z.]+:\s*', '', clean_t, flags=re.I)
+                    if clean_t:
+                        meta["product_name"] = clean_t
+            else:
+                meta["product_name"] = title_elem.get_text(strip=True)
+                
+            # Find review elements
+            review_elements = soup.find_all('div', {'data-hook': 'review'})
+            if not review_elements:
+                review_elements = soup.find_all(attrs={'data-hook': 'review'})
+            if not review_elements:
+                review_elements = soup.find_all('div', class_=re.compile(r'\breview\b', re.I))
+            
+            reviews = []
+            for rev in review_elements:
+                try:
+                    # 1. Rating
+                    rating = None
+                    rating_elem = (
+                        rev.find(attrs={'data-hook': 'review-star-rating'}) or
+                        rev.find(attrs={'data-hook': 'cmps-review-star-rating'}) or
+                        rev.find('i', class_=re.compile(r'a-star-\d')) or
+                        rev.find(class_=re.compile(r'review-rating'))
+                    )
+                    if rating_elem:
+                        rating_text = rating_elem.get_text(strip=True)
+                        match = re.search(r'(\d+(?:\.\d+)?)', rating_text)
+                        if match:
+                            try:
+                                rating = float(match.group(1))
+                            except ValueError:
+                                pass
+                    
+                    # 2. Title
+                    title_elem = (
+                        rev.find(attrs={'data-hook': 'reviewTitle'}) or
+                        rev.find(attrs={'data-hook': 'review-title'})
+                    )
+                    title_text = title_elem.get_text(strip=True) if title_elem else ""
+                    
+                    # 3. Body text
+                    body_elem = (
+                        rev.find(attrs={'data-hook': 'reviewRichContentContainer'}) or
+                        rev.find(attrs={'data-hook': 'reviewText'}) or
+                        rev.find(attrs={'data-hook': 'review-body'}) or
+                        rev.find(class_=re.compile(r'review-text', re.I))
+                    )
+                    if body_elem:
+                        # Decompose collapsible teaser elements
+                        for teaser in body_elem.find_all(class_=re.compile(r'a-hidden|a-teaser', re.I)):
+                            teaser.decompose()
+                        body_text = body_elem.get_text(separator=' ', strip=True)
+                    else:
+                        body_text = ""
+                    
+                    full_text = (title_text + '. ' + body_text).strip(' .') if title_text and body_text else (body_text or title_text)
+                    # Normalize excessive spaces
+                    full_text = re.sub(r'\s+', ' ', full_text).strip()
+                    
+                    if full_text and len(full_text) >= 3:
+                        reviews.append({
+                            'review_text': full_text,
+                            'rating': rating,
+                            'product_name': meta["product_name"]
+                        })
+                    
+                    if len(reviews) >= 50:
+                        break
+                except Exception:
+                    continue
+            
+            if reviews:
                 return (
                     True,
-                    f"Loaded {len(revs)} verified customer reviews for '{p_name}' (ASIN {asin}).",
-                    revs,
+                    f"Successfully extracted {len(reviews)} genuine reviews directly from Amazon for '{meta['product_name']}'.",
+                    reviews,
                     meta
                 )
-            return (
-                False,
-                f"Accessed product '{meta['product_name']}', but review elements could not be parsed from the static HTML "
-                "(Amazon dynamically hydrates review sections via JavaScript). "
-                "No fake reviews were generated. Please click 'View Product on Amazon' and import the reviews via CSV.",
-                None,
-                meta
-            )
-        
-        reviews = []
-        for review in review_elements:
-            try:
-                # Review text
-                review_text_elem = review.find('span', {'data-hook': 'review-body'}) or review.find('span', class_='review-text')
-                review_text = review_text_elem.get_text(strip=True) if review_text_elem else ""
                 
-                # Rating
-                rating_elem = review.find('i', {'data-hook': 'review-star-rating'}) or review.find('i', class_='review-rating')
-                rating = None
-                if rating_elem:
-                    rating_text = rating_elem.get_text(strip=True)
-                    match = re.search(r'(\d+\.?\d*)', rating_text)
-                    if match:
-                        rating = float(match.group(1))
-                
-                if review_text:
-                    reviews.append({
-                        'review_text': review_text,
-                        'rating': rating,
-                        'product_name': meta["product_name"]
-                    })
-                
-                if len(reviews) >= 50:
-                    break
-            except Exception:
+            # If no reviews found with this header, try next variant
+            if h_idx < len(header_variants) - 1:
                 continue
-        
-        if not reviews:
-            verified = get_verified_product_reviews(asin)
-            if verified:
-                p_name, revs = verified
-                meta["product_name"] = p_name
-                return (
-                    True,
-                    f"Loaded {len(revs)} verified customer reviews for '{p_name}' (ASIN {asin}).",
-                    revs,
-                    meta
-                )
+                
             return (
                 False,
-                "No customer review text was found on the page. Please use the CSV upload option for analysis.",
+                f"Connected to product page '{meta['product_name']}', but review elements were dynamically loaded by Amazon via JavaScript. "
+                "In strict compliance with our data authenticity policy, no fake or extra reviews were added. "
+                "Please click 'View Product on Amazon' and export genuine customer reviews to CSV for analysis.",
                 None,
                 meta
             )
-        
-        return (
-            True,
-            f"Successfully extracted {len(reviews)} genuine reviews directly from Amazon for '{meta['product_name']}'.",
-            reviews,
-            meta
-        )
-        
-    except requests.exceptions.Timeout:
-        verified = get_verified_product_reviews(asin)
-        if verified:
-            p_name, revs = verified
-            meta["product_name"] = p_name
+            
+        except requests.exceptions.Timeout:
+            if h_idx < len(header_variants) - 1:
+                continue
             return (
-                True,
-                f"Connection timed out; loaded {len(revs)} verified customer reviews for '{p_name}' (ASIN {asin}).",
-                revs,
+                False,
+                "The connection to Amazon timed out. Please check your internet connection or use the CSV upload option.",
+                None,
                 meta
             )
-        return (
-            False,
-            "The connection to Amazon timed out. Please check your internet connection or use the CSV upload option.",
-            None,
-            meta
-        )
-    except requests.exceptions.RequestException as e:
-        verified = get_verified_product_reviews(asin)
-        if verified:
-            p_name, revs = verified
-            meta["product_name"] = p_name
+        except requests.exceptions.RequestException as e:
+            if h_idx < len(header_variants) - 1:
+                continue
             return (
-                True,
-                f"Network exception; loaded {len(revs)} verified customer reviews for '{p_name}' (ASIN {asin}).",
-                revs,
+                False,
+                f"Network communication error with Amazon: {str(e)}. Please use the CSV upload option.",
+                None,
                 meta
             )
-        return (
-            False,
-            f"Network error while connecting to Amazon: {str(e)}. Please use CSV upload.",
-            None,
-            meta
-        )
-    except Exception as e:
-        return (
-            False,
-            f"Unexpected error while fetching reviews: {str(e)}. Please use CSV upload.",
-            None,
-            meta
-        )
+        except Exception as e:
+            return (
+                False,
+                f"Unexpected error while fetching reviews: {str(e)}. Please use the CSV upload option.",
+                None,
+                meta
+            )
+            
+    return (
+        False,
+        "Unable to fetch reviews directly from Amazon. Please use the CSV upload option.",
+        None,
+        meta
+    )
+

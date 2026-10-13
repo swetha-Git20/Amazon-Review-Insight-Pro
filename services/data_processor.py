@@ -52,24 +52,44 @@ def map_column_aliases(df: pd.DataFrame) -> pd.DataFrame:
 def parse_uploaded_file(uploaded_file) -> Tuple[bool, str, Optional[pd.DataFrame]]:
     """
     Parse uploaded file (CSV or Excel) into a pandas DataFrame.
-    Supports UTF-8, Latin-1, CP1252 encodings.
+    Supports UTF-8, UTF-8-SIG, Latin-1, CP1252, ISO-8859-1 encodings and various delimiters.
     """
     if uploaded_file is None:
         return False, "No file was uploaded.", None
+        
+    filename = getattr(uploaded_file, 'name', 'uploaded_file').lower()
     
-    filename = uploaded_file.name.lower()
-    
+    # Reset file pointer to beginning
+    if hasattr(uploaded_file, 'seek'):
+        try:
+            uploaded_file.seek(0)
+        except Exception:
+            pass
+            
     try:
         if filename.endswith('.csv'):
-            bytes_data = uploaded_file.getvalue()
-            # Try multiple encodings
-            encodings = ['utf-8', 'utf-8-sig', 'latin-1', 'cp1252']
+            if hasattr(uploaded_file, 'getvalue'):
+                bytes_data = uploaded_file.getvalue()
+            elif hasattr(uploaded_file, 'read'):
+                bytes_data = uploaded_file.read()
+            else:
+                bytes_data = uploaded_file
+                
+            encodings = ['utf-8', 'utf-8-sig', 'latin-1', 'cp1252', 'iso-8859-1']
             df = None
             last_err = None
             
             for enc in encodings:
                 try:
-                    df = pd.read_csv(io.BytesIO(bytes_data), encoding=enc)
+                    # First try standard comma-separated
+                    temp_df = pd.read_csv(io.BytesIO(bytes_data), encoding=enc)
+                    # If only 1 column and contains delimiter, try sniffing
+                    if len(temp_df.columns) == 1 and any(sep in str(temp_df.columns[0]) for sep in [';', '\t', '|']):
+                        try:
+                            temp_df = pd.read_csv(io.BytesIO(bytes_data), encoding=enc, sep=None, engine='python')
+                        except Exception:
+                            pass
+                    df = temp_df
                     break
                 except Exception as e:
                     last_err = e
@@ -78,19 +98,25 @@ def parse_uploaded_file(uploaded_file) -> Tuple[bool, str, Optional[pd.DataFrame
                 return False, f"Could not parse CSV file. Encoding error: {str(last_err)}", None
                 
         elif filename.endswith(('.xlsx', '.xls')):
+            if hasattr(uploaded_file, 'seek'):
+                uploaded_file.seek(0)
             df = pd.read_excel(uploaded_file)
         else:
             return False, "Unsupported file format. Please upload a .csv, .xlsx, or .xls file.", None
         
         if df.empty:
             return False, "The uploaded file is empty. Please upload a file containing review data.", None
+            
+        # Clean column names
+        df.columns = [str(c).strip() for c in df.columns]
         
         # Apply alias mapping
         df = map_column_aliases(df)
-        return True, "File parsed successfully.", df
+        return True, f"File '{getattr(uploaded_file, 'name', filename)}' parsed successfully.", df
         
     except Exception as e:
-        return False, f"Error reading file '{uploaded_file.name}': {str(e)}", None
+        orig_name = getattr(uploaded_file, 'name', 'file')
+        return False, f"Error reading file '{orig_name}': {str(e)}", None
 
 
 def validate_csv(df: pd.DataFrame) -> Tuple[bool, str]:

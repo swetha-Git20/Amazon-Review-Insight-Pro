@@ -37,7 +37,9 @@ from services.review_analyzer import (
     check_very_extreme_language,
     check_duplicate_or_similar,
     calculate_suspicion_score,
-    get_all_rule_descriptions
+    get_all_rule_descriptions,
+    generate_review_recommendation,
+    generate_product_recommendation
 )
 from services.data_processor import (
     parse_uploaded_file, validate_csv, clean_dataframe,
@@ -338,11 +340,15 @@ def test_amazon_url_details():
     """Test Requirement 4: Amazon URL parser, ASIN extraction, and demo products."""
     log_test("Amazon URL Parser & Product Link Generator")
     
+    # Expanded test URLs covering missing protocol, lowercase ASIN, slugs, queries
     test_urls = [
         ("https://www.amazon.com/dp/B0863TXGM3", "B0863TXGM3", "amazon.com"),
         ("https://www.amazon.in/boAt-Rockerz-450/dp/B07PR1CL3S", "B07PR1CL3S", "amazon.in"),
         ("https://amazon.co.uk/gp/product/B08N5WRWNW?ref=nav", "B08N5WRWNW", "amazon.co.uk"),
-        ("https://www.amazon.de/product-reviews/B09TMN58KL", "B09TMN58KL", "amazon.de")
+        ("https://www.amazon.de/product-reviews/B09TMN58KL", "B09TMN58KL", "amazon.de"),
+        ("amazon.in/dp/B07PR1CL3S", "B07PR1CL3S", "amazon.in"),  # Missing https protocol
+        ("https://www.amazon.com/dp/b0863txgm3", "B0863TXGM3", "amazon.com"),  # Lowercase ASIN
+        ("https://www.amazon.com/Sony-Noise-Cancelling/dp/B0863TXGM3?th=1&psc=1", "B0863TXGM3", "amazon.com")  # Slugs & queries
     ]
     
     for url, expected_asin, expected_domain in test_urls:
@@ -372,6 +378,45 @@ def test_amazon_url_details():
     log_pass("Amazon URL Parser & Product Link Generator")
 
 
+def test_review_and_product_recommendations():
+    """Test Requirement 5: Recommendation generation based strictly on actual review text and sentiment."""
+    log_test("Recommendation Engine (Review & Product Level)")
+    
+    # 1. Positive review -> Recommended with actual quote
+    pos_text = "The sound quality is amazing for the price! Battery life is excellent and lasts all day."
+    rec_pos = generate_review_recommendation(pos_text, rating=5.0, sentiment="Positive", polarity=0.6)
+    assert rec_pos.startswith("Recommended"), f"Expected Recommended, got: {rec_pos}"
+    assert "sound quality" in rec_pos.lower(), "Must cite actual words from review"
+    
+    # 2. Negative review -> Not Recommended with actual quote
+    neg_text = "WORST HEADPHONES EVER! DO NOT BUY! COMPLETE WASTE OF MONEY!!!"
+    rec_neg = generate_review_recommendation(neg_text, rating=1.0, sentiment="Negative", polarity=-0.7)
+    assert rec_neg.startswith("Not Recommended"), f"Expected Not Recommended, got: {rec_neg}"
+    assert "worst" in rec_neg.lower(), "Must cite actual negative feedback from review"
+    
+    # 3. Moderate / Neutral review -> Mixed with actual quote
+    mix_text = "Not bad, but the noise cancellation could be better. Audio is decent though."
+    rec_mix = generate_review_recommendation(mix_text, rating=3.0, sentiment="Neutral", polarity=0.05)
+    assert rec_mix.startswith("Mixed"), f"Expected Mixed, got: {rec_mix}"
+    assert "noise cancellation" in rec_mix.lower() or "not bad" in rec_mix.lower()
+    
+    # 4. Product-level recommendation synthesis
+    sample_corpus = [
+        {"review_text": "Superb sound quality and battery life!", "rating": 5.0, "sentiment": "Positive", "polarity": 0.5},
+        {"review_text": "Great headphones, very comfortable.", "rating": 4.0, "sentiment": "Positive", "polarity": 0.4},
+        {"review_text": "Works decently for the price range.", "rating": 4.0, "sentiment": "Positive", "polarity": 0.2},
+        {"review_text": "Broke after 2 weeks, terrible build quality.", "rating": 1.0, "sentiment": "Negative", "polarity": -0.6}
+    ]
+    prod_summary = generate_product_recommendation(sample_corpus)
+    assert prod_summary["verdict"] == "Recommended", f"Expected Recommended product verdict, got: {prod_summary['verdict']}"
+    assert prod_summary["rec_count"] == 3
+    assert prod_summary["not_rec_count"] == 1
+    assert prod_summary["rec_pct"] == 75.0
+    assert "genuine customer reviews" in prod_summary["explanation"]
+    
+    log_pass("Recommendation Engine (Review & Product Level)")
+
+
 def run_all_tests():
     """Execute complete test suite."""
     print("=" * 60)
@@ -385,6 +430,7 @@ def run_all_tests():
         test_suspicion_heuristics()
         test_file_upload_processor()
         test_amazon_url_details()
+        test_review_and_product_recommendations()
         
         print("=" * 60)
         print("[SUCCESS] ALL TESTS COMPLETED SUCCESSFULLY!")
@@ -403,3 +449,4 @@ def run_all_tests():
 if __name__ == "__main__":
     success = run_all_tests()
     sys.exit(0 if success else 1)
+
