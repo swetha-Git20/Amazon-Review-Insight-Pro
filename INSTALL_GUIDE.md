@@ -1,111 +1,113 @@
-# Installation Guide for Amazon Review Insight Pro
+# Installation & Setup Guide: Amazon Review Insight Pro Analyzer
 
-## Prerequisites
+This guide walks you through setting up and running **Amazon Review Insight Pro Analyzer** on Windows, macOS, or Linux.
 
-- Python 3.10 or higher must be installed on your system
-- pip (Python package installer) should be available
+---
 
-## Python Installation (if not already installed)
+## 📋 System Prerequisites
 
-### Windows
-1. Download Python from https://www.python.org/downloads/
-2. Run the installer
-3. **IMPORTANT:** Check "Add Python to PATH" during installation
-4. Verify installation by opening Command Prompt and running: `python --version`
+- **Python 3.10+** (Python 3.10, 3.11, 3.12, or 3.13)
+- **pip** (Python package installer)
+- Git (optional, for cloning)
 
-### Mac
-1. Install Homebrew if not already installed: `/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"`
-2. Install Python: `brew install python@3.11`
-3. Verify installation: `python3 --version`
-
-### Linux (Ubuntu/Debian)
-1. Update package list: `sudo apt update`
-2. Install Python: `sudo apt install python3.10 python3.10-venv python3-pip`
-3. Verify installation: `python3 --version`
-
-## Project Installation Steps
-
-1. **Navigate to project directory**
-   ```bash
-   cd "C:\Users\laksh\Music\Amazon Review Insight Pro"
-   ```
-
-2. **Create virtual environment**
-   ```bash
-   # Windows
-   python -m venv venv
-   
-   # Mac/Linux
-   python3 -m venv venv
-   ```
-
-3. **Activate virtual environment**
-   ```bash
-   # Windows
-   venv\Scripts\activate
-   
-   # Mac/Linux
-   source venv/bin/activate
-   ```
-
-4. **Install dependencies**
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-5. **Download spaCy model**
-   ```bash
-   python -m spacy download en_core_web_sm
-   ```
-
-6. **Run the application**
-   ```bash
-   streamlit run app.py
-   ```
-
-7. **Open in browser**
-   The application will automatically open at http://localhost:8501
-
-## Troubleshooting
-
-### "Python is not recognized" error
-- Make sure Python is installed and added to PATH
-- Restart your terminal/command prompt after installation
-- Try using `python3` instead of `python`
-
-### pip install fails
-- Upgrade pip first: `python -m pip install --upgrade pip`
-- Use the --user flag: `pip install --user -r requirements.txt`
-
-### spaCy model download fails
-- Try: `python -m spacy download en_core_web_sm --direct`
-- Or manually download from: https://github.com/explosion/spacy-models/releases
-
-### Streamlit not found
-- Make sure virtual environment is activated
-- Install streamlit directly: `pip install streamlit`
-
-### Database errors
-- The database will be auto-created on first run
-- Make sure the `data/` directory exists
-- Check file permissions
-
-## Testing
-
-Run unit tests:
+Verify your Python installation:
 ```bash
-python tests/test_core.py
+python --version
 ```
 
-## Deactivating Virtual Environment
+---
 
-When done, deactivate the virtual environment:
+## 🛠️ Step-by-Step Installation
+
+### Step 1: Open the Project Directory
+Navigate into the application folder:
 ```bash
-   deactivate
+cd "Amazon Review Insight Pro"
 ```
 
-## Next Time You Run the Project
+### Step 2: Set Up Virtual Environment
+Creating an isolated virtual environment is recommended to avoid dependency conflicts.
 
-1. Navigate to project directory
-2. Activate virtual environment (step 3 above)
-3. Run: `streamlit run app.py`
+**On Windows:**
+```powershell
+python -m venv venv
+.\venv\Scripts\activate
+```
+
+**On macOS / Linux:**
+```bash
+python3 -m venv venv
+source venv/bin/activate
+```
+
+### Step 3: Install Required Dependencies
+Install all platform dependencies via pip:
+```bash
+pip install -r requirements.txt
+```
+
+*(Includes: `streamlit`, `pandas`, `textblob`, `spacy`, `plotly`, `requests`, `beautifulsoup4`, `openpyxl`)*
+
+### Step 4: Optional NLP Language Model
+To enable advanced entity and noun/adjective tokenization:
+```bash
+python -m spacy download en_core_web_sm
+```
+*(If omitted, the platform gracefully uses built-in lightweight NLP processing).*
+
+---
+
+## 🚀 Running the Application
+
+Start the server using Streamlit:
+```bash
+streamlit run app.py
+```
+
+On Windows, you can also double-click `start.bat`.
+
+The application will initialize its database automatically on first launch and open in your default browser.
+
+---
+
+## 🧪 Verifying the Installation
+
+Execute the comprehensive test suite to confirm all modules (authentication, data isolation, sentiment, suspicion rules, and file parsers) are working properly:
+
+```bash
+python -u tests/test_core.py
+```
+
+Expected output:
+```
+============================================================
+Amazon Review Insight Pro Analyzer - Test Verification Suite
+============================================================
+[TEST] Password Security & User Authentication...
+ [PASS] Password Security & User Authentication
+[TEST] User Data Isolation (Account Privacy)...
+ [PASS] User Data Isolation (Account Privacy)
+[TEST] Sentiment Analysis Service...
+ [PASS] Sentiment Analysis Service
+[TEST] 7 Heuristic Suspicion Rules...
+ [PASS] 7 Heuristic Suspicion Rules
+[TEST] File Upload & Data Processor...
+ [PASS] File Upload & Data Processor
+[TEST] Amazon URL Parser & Product Link Generator...
+ [PASS] Amazon URL Parser & Product Link Generator
+============================================================
+[SUCCESS] ALL TESTS COMPLETED SUCCESSFULLY!
+============================================================
+```
+
+---
+
+## ❓ Troubleshooting
+
+### Database Access Issues
+- The SQLite database file is automatically created at `data/reviews.db` with Write-Ahead Logging (WAL) enabled for concurrent safety.
+- Ensure the user account running the application has read/write permissions to the `data/` folder.
+
+### File Upload Column Warnings
+- When uploading datasets, ensure the column containing customer review text is named `review_text` (or common variants like `review`, `comment`, or `text`).
+- Star ratings should be in the range of 1.0 to 5.0.

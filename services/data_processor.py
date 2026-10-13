@@ -1,70 +1,137 @@
 """
-Data processor service for Amazon Review Insight Pro
-Handles CSV validation, data cleaning, and batch processing of reviews.
+Data processor service for Amazon Review Insight Pro Analyzer
+Handles file parsing (CSV/Excel), column auto-mapping, data validation,
+text cleaning, and batch NLP processing.
 """
 
 import pandas as pd
 import re
+import io
 from typing import Dict, List, Tuple, Optional
-import sys
 
 
-# Required columns for CSV
-REQUIRED_COLUMNS = ['review_text', 'rating']
-OPTIONAL_COLUMNS = ['product_name']
+# Standard expected columns
+REQUIRED_COLUMNS = ['review_text']
+RECOMMENDED_COLUMNS = ['rating', 'product_name']
 
-# Maximum reviews per analysis
-MAX_REVIEWS = 50
+# Column aliases for flexible user upload experience
+COLUMN_ALIASES = {
+    'review_text': ['review_text', 'review', 'text', 'content', 'review_body', 'comment', 'feedback', 'reviews'],
+    'rating': ['rating', 'score', 'stars', 'star_rating', 'user_rating', 'overall_rating'],
+    'product_name': ['product_name', 'product', 'title', 'item_name', 'product_title', 'asin_title']
+}
+
+# Maximum reviews analyzed per batch
+MAX_REVIEWS = 100
+
+
+def map_column_aliases(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Automatically map common column name variations to standard names.
+    
+    Why: Improves UX by accepting files exported from various scrapers or tools.
+    """
+    df_mapped = df.copy()
+    lower_to_orig = {col.lower().strip().replace(' ', '_'): col for col in df_mapped.columns}
+    
+    rename_dict = {}
+    for standard_col, aliases in COLUMN_ALIASES.items():
+        if standard_col not in df_mapped.columns:
+            for alias in aliases:
+                if alias in lower_to_orig:
+                    orig_col = lower_to_orig[alias]
+                    rename_dict[orig_col] = standard_col
+                    break
+    
+    if rename_dict:
+        df_mapped = df_mapped.rename(columns=rename_dict)
+    
+    return df_mapped
+
+
+def parse_uploaded_file(uploaded_file) -> Tuple[bool, str, Optional[pd.DataFrame]]:
+    """
+    Parse uploaded file (CSV or Excel) into a pandas DataFrame.
+    Supports UTF-8, Latin-1, CP1252 encodings.
+    """
+    if uploaded_file is None:
+        return False, "No file was uploaded.", None
+    
+    filename = uploaded_file.name.lower()
+    
+    try:
+        if filename.endswith('.csv'):
+            bytes_data = uploaded_file.getvalue()
+            # Try multiple encodings
+            encodings = ['utf-8', 'utf-8-sig', 'latin-1', 'cp1252']
+            df = None
+            last_err = None
+            
+            for enc in encodings:
+                try:
+                    df = pd.read_csv(io.BytesIO(bytes_data), encoding=enc)
+                    break
+                except Exception as e:
+                    last_err = e
+            
+            if df is None:
+                return False, f"Could not parse CSV file. Encoding error: {str(last_err)}", None
+                
+        elif filename.endswith(('.xlsx', '.xls')):
+            df = pd.read_excel(uploaded_file)
+        else:
+            return False, "Unsupported file format. Please upload a .csv, .xlsx, or .xls file.", None
+        
+        if df.empty:
+            return False, "The uploaded file is empty. Please upload a file containing review data.", None
+        
+        # Apply alias mapping
+        df = map_column_aliases(df)
+        return True, "File parsed successfully.", df
+        
+    except Exception as e:
+        return False, f"Error reading file '{uploaded_file.name}': {str(e)}", None
 
 
 def validate_csv(df: pd.DataFrame) -> Tuple[bool, str]:
     """
-    Validate that CSV has required columns and data.
-    
-    Why: Ensure uploaded data meets minimum requirements before processing.
-    
-    Input: df (pd.DataFrame) - DataFrame from uploaded CSV
-    
-    Output: Tuple[bool, str] - (is_valid, error_message)
+    Validate that DataFrame has required columns and at least one non-empty review.
     """
-    # Check if DataFrame is empty
-    if df.empty:
-        return False, "CSV file is empty. Please upload a file with data."
+    if df is None or df.empty:
+        return False, "Dataset is empty. Please upload a file with review data."
     
-    # Check for required columns
-    missing_columns = [col for col in REQUIRED_COLUMNS if col not in df.columns]
-    if missing_columns:
-        return False, f"Missing required columns: {', '.join(missing_columns)}. Required: {', '.join(REQUIRED_COLUMNS)}"
+    df_mapped = map_column_aliases(df)
     
-    # Check if review_text column has data
-    if df['review_text'].isna().all() or (df['review_text'].str.strip() == '').all():
-        return False, "Review text column is empty. Please ensure reviews have text."
+    if 'review_text' not in df_mapped.columns:
+        cols_found = ", ".join([f"'{c}'" for c in df.columns])
+        return (
+            False,
+            f"Missing required column 'review_text'. Found columns: {cols_found}. "
+            "Please ensure your file has a column named 'review_text' or 'review'."
+        )
+    
+    # Check if review_text has valid content
+    text_series = df_mapped['review_text'].dropna().astype(str).str.strip()
+    if text_series.empty or (text_series == '').all():
+        return False, "The 'review_text' column contains only empty or missing values."
     
     return True, ""
 
 
 def clean_text(text: str) -> str:
     """
-    Clean review text by removing URLs, HTML, extra symbols, and normalizing whitespace.
-    
-    Why: Standardize text for consistent analysis while preserving original for display.
-    
-    Input: text (str) - Raw review text
-    
-    Output: str - Cleaned text
+    Clean review text: removes URLs, HTML tags, normalize whitespace,
+    while preserving standard punctuation and semantics.
     """
     if pd.isna(text) or not isinstance(text, str):
         return ""
     
     # Remove URLs
-    text = re.sub(r'http\S+|www\S+|https\S+', '', text, flags=re.MULTILINE)
-    
+    text = re.sub(r'https?://\S+|www\.\S+', '', text)
     # Remove HTML tags
-    text = re.sub(r'<.*?>', '', text)
-    
-    # Remove extra symbols (keep basic punctuation)
-    text = re.sub(r'[^\w\s\.,!?;:\-\'"]', '', text)
-    
+    text = re.sub(r'<[^>]+>', '', text)
+    # Remove excessive repeated symbols
+    text = re.sub(r'([!?.])\1{4,}', r'\1\1\1', text)
     # Normalize whitespace
     text = re.sub(r'\s+', ' ', text).strip()
     
@@ -73,156 +140,111 @@ def clean_text(text: str) -> str:
 
 def clean_rating(rating) -> Optional[float]:
     """
-    Clean and validate rating value.
-    
-    Why: Ensure rating is a valid number between 1 and 5.
-    
-    Input: rating - Raw rating value (any type)
-    
-    Output: Optional[float] - Validated rating or None if invalid
+    Validate and clamp rating to 1.0 - 5.0 range.
     """
+    if pd.isna(rating):
+        return None
     try:
-        # Convert to float
-        rating_float = float(rating)
-        
-        # Check if rating is in valid range
-        if 1 <= rating_float <= 5:
-            return rating_float
-        else:
-            return None
+        val = float(rating)
+        if 1.0 <= val <= 5.0:
+            return round(val, 1)
+        elif 0.0 <= val <= 1.0:
+            # Handle normalized 0-1 scale
+            return round(val * 5.0, 1)
+        elif 5.0 < val <= 10.0:
+            # Handle 1-10 scale
+            return round(val / 2.0, 1)
+        return None
     except (ValueError, TypeError):
         return None
 
 
 def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Clean and validate the entire DataFrame.
-    
-    Why: Remove invalid data while preserving valid reviews for analysis.
-    
-    Input: df (pd.DataFrame) - Raw DataFrame
-    
-    Output: pd.DataFrame - Cleaned DataFrame
+    Clean and standardize DataFrame.
     """
-    # Make a copy to avoid modifying original
-    df_clean = df.copy()
+    df_clean = map_column_aliases(df)
     
-    # Add product_name column if missing
     if 'product_name' not in df_clean.columns:
-        df_clean['product_name'] = 'Unknown Product'
+        df_clean['product_name'] = 'General Product'
+    else:
+        df_clean['product_name'] = df_clean['product_name'].fillna('General Product').astype(str).str.strip()
+        df_clean['product_name'] = df_clean['product_name'].replace('', 'General Product')
     
-    # Clean review text (keep original for display, add cleaned column)
+    if 'rating' not in df_clean.columns:
+        df_clean['rating'] = None
+    else:
+        df_clean['rating'] = df_clean['rating'].apply(clean_rating)
+    
+    # Clean review text
     df_clean['cleaned_text'] = df_clean['review_text'].apply(clean_text)
     
-    # Clean rating
-    df_clean['rating'] = df_clean['rating'].apply(clean_rating)
-    
-    # Drop rows with missing values in critical columns
-    df_clean = df_clean.dropna(subset=['cleaned_text', 'rating'])
-    
-    # Drop rows with empty cleaned text
+    # Filter out empty cleaned reviews
     df_clean = df_clean[df_clean['cleaned_text'].str.strip() != '']
     
-    # Drop exact duplicate reviews (same product and text)
-    df_clean = df_clean.drop_duplicates(subset=['product_name', 'review_text'])
+    # Deduplicate exact duplicate reviews for the same product
+    df_clean = df_clean.drop_duplicates(subset=['product_name', 'cleaned_text'])
     
-    # Reset index
     df_clean = df_clean.reset_index(drop=True)
-    
     return df_clean
 
 
-def limit_reviews(df: pd.DataFrame) -> Tuple[pd.DataFrame, bool]:
+def limit_reviews(df: pd.DataFrame, max_limit: int = MAX_REVIEWS) -> Tuple[pd.DataFrame, bool]:
     """
-    Limit reviews to maximum allowed (50) and warn if exceeded.
-    
-    Why: Prevent performance issues with large datasets.
-    
-    Input: df (pd.DataFrame) - DataFrame to limit
-    
-    Output: Tuple[pd.DataFrame, bool] - (limited_df, was_limited)
+    Limit review batch to max_limit to ensure fast NLP processing.
     """
-    if len(df) > MAX_REVIEWS:
-        return df.head(MAX_REVIEWS), True
+    if len(df) > max_limit:
+        return df.head(max_limit), True
     return df, False
 
 
 def process_reviews_batch(df: pd.DataFrame, sentiment_analyzer, review_analyzer) -> List[Dict]:
     """
-    Process a batch of reviews with sentiment and suspicion analysis.
-    
-    Why: Apply NLP analysis to all reviews in a CSV upload.
-    
-    Input: df (pd.DataFrame) - Cleaned DataFrame
-           sentiment_analyzer - Sentiment analysis function
-           review_analyzer - Review analyzer function
-    
-    Output: List[Dict] - List of processed review dictionaries
+    Execute batch sentiment analysis and suspicion heuristic classification.
     """
     processed_reviews = []
+    if df.empty:
+        return processed_reviews
     
-    # Get existing texts for duplicate check
-    existing_texts = df['cleaned_text'].tolist()
+    cleaned_texts = df['cleaned_text'].tolist()
     
     for _, row in df.iterrows():
-        # Get text for analysis
         text = row['cleaned_text']
-        
-        # Skip if text is empty
-        if not text or text.strip() == '':
+        if not text:
             continue
         
-        # Analyze sentiment
-        sentiment_result = sentiment_analyzer(text)
+        # Sentiment
+        sentiment_res = sentiment_analyzer(text)
         
-        # Analyze suspicion (remove current text from existing for comparison)
-        other_texts = [t for t in existing_texts if t != text]
-        suspicion_result = review_analyzer(text, other_texts)
+        # Suspicion score (cross-check against other reviews in batch for similarity)
+        other_texts = [t for t in cleaned_texts if t != text]
+        suspicion_res = review_analyzer(text, other_texts)
         
-        # Build review dictionary
-        review_data = {
-            'product_name': row.get('product_name', 'Unknown Product'),
-            'review_text': row['review_text'],  # Keep original text
+        processed_reviews.append({
+            'product_name': str(row.get('product_name', 'General Product')),
+            'review_text': str(row['review_text']),
             'rating': row['rating'],
-            'sentiment': sentiment_result['sentiment'],
-            'polarity': sentiment_result['polarity'],
-            'subjectivity': sentiment_result['subjectivity'],
-            'suspicion_score': suspicion_result['suspicion_score'],
-            'classification': suspicion_result['classification']
-        }
-        
-        processed_reviews.append(review_data)
+            'sentiment': sentiment_res['sentiment'],
+            'polarity': sentiment_res['polarity'],
+            'subjectivity': sentiment_res['subjectivity'],
+            'suspicion_score': suspicion_res['suspicion_score'],
+            'classification': suspicion_res['classification']
+        })
     
     return processed_reviews
 
 
 def get_sample_csv_path() -> str:
-    """
-    Get the path to the sample CSV file.
-    
-    Why: Provide easy access to sample data for testing.
-    
-    Input: None
-    
-    Output: str - Path to sample CSV file
-    """
+    """Path to sample review dataset."""
     import os
     return os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data', 'sample_reviews.csv')
 
 
 def load_sample_csv() -> pd.DataFrame:
-    """
-    Load the sample CSV file.
-    
-    Why: Provide default data for testing and demonstration.
-    
-    Input: None
-    
-    Output: pd.DataFrame - Sample reviews DataFrame
-    """
+    """Load default sample review dataset."""
     try:
-        sample_path = get_sample_csv_path()
-        return pd.read_csv(sample_path)
+        path = get_sample_csv_path()
+        return pd.read_csv(path)
     except Exception as e:
         print(f"Error loading sample CSV: {e}")
         return pd.DataFrame()
