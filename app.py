@@ -7,8 +7,6 @@ and user-specific analysis history.
 
 import streamlit as st
 import pandas as pd
-import json
-import io
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime
@@ -29,7 +27,7 @@ from services.review_analyzer import (
 )
 from services.data_processor import (
     parse_uploaded_file, validate_csv, clean_dataframe,
-    limit_reviews, process_reviews_batch, load_sample_csv, MAX_REVIEWS
+    limit_reviews, process_reviews_batch, MAX_REVIEWS
 )
 from services.review_fetcher import (
     fetch_reviews_from_url, extract_amazon_details, DEMO_PRODUCTS
@@ -709,73 +707,6 @@ def render_dashboard():
             )
             st.plotly_chart(fig_score, use_container_width=True)
 
-        # Export Suite
-        st.markdown("---")
-        st.markdown("#### 📥 Export Analysis Data & Reports")
-        
-        exp_col1, exp_col2, exp_col3 = st.columns(3)
-        with exp_col1:
-            csv_data = df.to_csv(index=False).encode('utf-8')
-            st.download_button(
-                label="📄 Export Dataset (CSV)",
-                data=csv_data,
-                file_name=f"amazon_reviews_{selected_product.replace(' ', '_').lower()}.csv",
-                mime="text/csv",
-                use_container_width=True
-            )
-        with exp_col2:
-            report_json = {
-                "project": "Amazon Review Insight Pro Analyzer",
-                "user": user['username'],
-                "product_analyzed": selected_product,
-                "export_timestamp": datetime.now().isoformat(),
-                "metrics": {
-                    "total_reviews": total,
-                    "average_rating": round(avg_rating, 2),
-                    "positive_reviews": positive,
-                    "negative_reviews": negative,
-                    "neutral_reviews": neutral,
-                    "genuine_reviews": genuine,
-                    "suspicious_reviews": suspicious,
-                    "authenticity_ratio_percent": round(gen_pct, 1)
-                },
-                "reviews_sample": reviews[:20]
-            }
-            json_data = json.dumps(report_json, indent=2).encode('utf-8')
-            st.download_button(
-                label="📦 Export Summary Report (JSON)",
-                data=json_data,
-                file_name=f"review_analysis_{selected_product.replace(' ', '_').lower()}.json",
-                mime="application/json",
-                use_container_width=True
-            )
-        with exp_col3:
-            md_report = f"""# Amazon Review Insight Pro Analyzer - Executive Report
-Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-User Account: {user['username']}
-Product: {selected_product}
-
-## Executive Summary
-- Total Reviews Analyzed: {total}
-- Average Rating: {avg_rating:.2f} / 5.0
-- Positive Sentiment: {positive} ({pos_pct:.1f}%)
-- Negative Sentiment: {negative} ({neg_pct:.1f}%)
-- Neutral Sentiment: {neutral}
-- Genuine-Looking Reviews: {genuine} ({gen_pct:.1f}%)
-- Suspicious Reviews: {suspicious} ({sus_pct:.1f}%)
-
-## Assessment
-{consensus}
-{authenticity_note}
-"""
-            st.download_button(
-                label="📝 Export Executive Summary (Markdown)",
-                data=md_report.encode('utf-8'),
-                file_name=f"executive_summary_{selected_product.replace(' ', '_').lower()}.md",
-                mime="text/markdown",
-                use_container_width=True
-            )
-
     # -------------------------------------------------------------
     # SECTION: Analysis History for Logged-In User (Requirement 5)
     # -------------------------------------------------------------
@@ -1094,21 +1025,6 @@ def render_analyzer():
                                 info_box("Data is ready. Click 'Dashboard' in top navigation to view full analysis.", "success")
                             else:
                                 st.error("No valid reviews could be extracted after text cleaning.")
-                                
-        st.markdown("---")
-        st.markdown("###### Need a template or test data?")
-        col_samp1, col_samp2 = st.columns([1, 2])
-        with col_samp1:
-            sample_df = load_sample_csv()
-            if not sample_df.empty:
-                sample_csv_bytes = sample_df.to_csv(index=False).encode('utf-8')
-                st.download_button(
-                    label="📥 Download sample_reviews.csv",
-                    data=sample_csv_bytes,
-                    file_name="sample_reviews.csv",
-                    mime="text/csv",
-                    use_container_width=True
-                )
 
     # -------------------------------------------------------------
     # TAB 3: AMAZON PRODUCT URL & DEMOS
@@ -1321,17 +1237,6 @@ def render_data():
         display_df['rating'] = display_df['rating'].apply(display_rating_stars)
         
         st.dataframe(display_df, use_container_width=True, height=440)
-        
-        col_down, _ = st.columns([1, 2])
-        with col_down:
-            down_csv = filtered_df.to_csv(index=False).encode('utf-8')
-            st.download_button(
-                label="📥 Download Filtered Results (CSV)",
-                data=down_csv,
-                file_name="filtered_amazon_reviews.csv",
-                mime="text/csv",
-                use_container_width=True
-            )
     else:
         st.info("No reviews match the current search filters.")
         
